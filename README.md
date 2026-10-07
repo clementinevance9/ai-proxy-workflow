@@ -1,43 +1,25 @@
-# GPT-6 Sol — Proxy Workflow And API Boundary
+# Small OpenAI-compatible reverse proxy
 
-Argolink-focused proxy workflow and API boundary for GPT-6 Sol. This repository is a self-contained integration reference: it explains the request shape, the asynchronous lifecycle where applicable, safe retries, and the failure states that matter in production.
+This repository shows a deliberately small Python reverse proxy that keeps an upstream key on the server while presenting familiar Responses, chat completions, and image paths to a trusted local client. **[ArgoLink](https://argolink.io/gh-ai-proxy-workflow) is an example upstream, not a hard-coded brand.** The proxy is a reference implementation, not a production gateway. Last checked: 2026-10-07.
 
-[GPT-6 Sol model page →](https://argolink.io/gh-ai-proxy-workflow) · [Argolink API docs →](https://argolink.io/gh-unified-api-docs)
+## What it does
 
-The model page is authoritative for live availability, pricing, limits, and fields. This repository gives the workflow a searchable home; it does not invent a second model catalog.
+The server accepts only three POST paths, caps request bodies at two megabytes, adds a User-Agent, forwards JSON to UPSTREAM_BASE_URL, and returns the upstream status and body. The client never sees UPSTREAM_API_KEY. LISTEN_HOST defaults to loopback. There is no automatic retry, request cache, streaming relay, auth layer, rate limiter, or persistence. Those omissions are deliberate: adding them without a deployment contract would create false security.
 
-## What is inside
+## Run locally
 
-- `docs/model-contract.md`: model-specific facts checked against the current Argolink catalog.
-- `docs/workflow.md`: the intent behind this repository and the decision points that prevent accidental resubmission.
-- `examples/request.sh` and `examples/client.py`: safe, runnable request examples using `ARGOLINK_API_KEY`.
-- `tests/test_repository.py`: offline checks for the public contract and examples.
-- `ARGOLINK.md`: public-boundary rules for contributors.
+Set UPSTREAM_BASE_URL to a compatible base and UPSTREAM_API_KEY in the server environment, then run python3 proxy/server.py. Point a local SDK at http://127.0.0.1:8080 and provide only its client-side key if your local caller needs one. For ArgoLink, the upstream base is https://argolink.io/v1 and the server should receive the key through a secret manager. Never put the key in this README, a compose file, or an issue.
 
-## Quick start
+## Deploying safely
 
-Set the key only in your shell or secret manager, then run the example:
+Place TLS and authentication in front of the process. Allowlist the client network, set a process timeout, and use a supervisor with a health check. Run as an unprivileged user. Redact Authorization headers and signed media URLs in logs. Pin the Python runtime and audit dependencies. The example catches upstream exceptions and returns 502; it does not reveal the upstream key, but the exception string still belongs in a private log policy. Limit request size before parsing JSON.
 
-```bash
-export ARGOLINK_API_KEY='your-key'
-./examples/request.sh
-```
+The proxy forwards POST bodies but does not know whether a provider's operation is idempotent. If a connection drops after forwarding, do not replay a generation automatically. Video generation is asynchronous and should use a separate explicit submit/status/content runner; this proxy intentionally does not invent a video route.
 
-The example uses model ID `gpt-6-sol` and endpoint family `/v1/responses`. The response is JSON; keep the returned request ID and redacted error body when diagnosing a failure. A timeout does not prove that a request was rejected, so do not submit a second request automatically.
+## Compatibility
 
-## Model facts
+The OpenAI-compatible paths still depend on the upstream's exact model IDs and supported features. Responses, chat completions, and images are not interchangeable contracts. Validate tools, streaming, structured output, image sizes, and usage fields with a local mock before production. The model page or provider docs win over this example.
 
-- Model ID: `gpt-6-sol`
-- Argolink model page: `https://argolink.io/gh-ai-proxy-workflow` (tracked shortlink; destination is the model page)
-- Endpoint family: `/v1/responses`
-- Context: `1,050,000` tokens; max output: `128000` tokens.
-- Reasoning efforts: `low, medium, high, xhigh, max`; default: `medium`.
-- Listed token rates: input `$2` / output `$10` per million tokens; cached input `$0.2` when listed.
+## Tests and FAQ
 
-## Scope
-
-This repository has one clear search intent: **proxy workflow and API boundary**. It keeps the integration boundary small enough for a developer or an AI assistant to answer a concrete question, while linking the live Argolink model page for changes.
-
-## Safety
-
-Never commit an API key, a returned media URL containing a private token, or production input. Examples are deliberately small and do not make a request during tests.
+python3 -m unittest discover -s tests checks the body cap and User-Agent source without network access. **Why no client authentication?** Add a real auth middleware before exposing it beyond localhost. **Can it hide a key?** It keeps the upstream key server-side, but deployment controls access. **Why 502?** The upstream transport failed; inspect private logs. **Does it support streaming?** No; implement and test streaming separately rather than buffering a production stream accidentally.
