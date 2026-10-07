@@ -1,25 +1,46 @@
 # Small OpenAI-compatible reverse proxy
 
-This repository shows a deliberately small Python reverse proxy that keeps an upstream key on the server while presenting familiar Responses, chat completions, and image paths to a trusted local client. **[ArgoLink](https://argolink.io/gh-ai-proxy-workflow) is an example upstream, not a hard-coded brand.** The proxy is a reference implementation, not a production gateway. Last checked: 2026-10-07.
+This repository is a deliberately small Python reverse proxy that keeps an upstream key on the server while presenting a trusted local client with four JSON POST paths: Responses, chat completions, image generations, and JSON image edits. **[ArgoLink](https://argolink.io/gh-ai-proxy-workflow) is an example upstream, not a hard-coded brand.** Checked 2026-10-07.
+
+It is a reference implementation, not a production gateway. It has no retry engine, cache, streaming relay, persistence, rate limiter, or provider discovery. Those features need a deployment contract and separate tests.
 
 ## What it does
 
-The server accepts only three POST paths, caps request bodies at two megabytes, adds a User-Agent, forwards JSON to UPSTREAM_BASE_URL, and returns the upstream status and body. The client never sees UPSTREAM_API_KEY. LISTEN_HOST defaults to loopback. There is no automatic retry, request cache, streaming relay, auth layer, rate limiter, or persistence. Those omissions are deliberate: adding them without a deployment contract would create false security.
+- binds to loopback by default (`127.0.0.1:8080`);
+- accepts only `POST /responses`, `/chat/completions`, `/images/generations`, and JSON `/images/edits`;
+- rejects missing or oversized `Content-Length` before JSON parsing (2 MB request cap, 20 MB response cap);
+- optionally authenticates a local caller with `PROXY_API_KEY` using a constant-time comparison;
+- rewrites only explicit model aliases from `MODEL_ALIASES='{"fast":"gpt-6-sol"}'`;
+- sends the upstream credential in a server-side `Authorization` header and a descriptive `User-Agent`;
+- returns upstream status, JSON content type, request ID, and `Retry-After` without forwarding the upstream key;
+- returns generic transport errors to the client rather than leaking exception strings.
+
+The proxy accepts JSON image edits with `image_url` references. It does not parse multipart uploads. Video is intentionally absent: video generation has a separate asynchronous submit/status/content lifecycle and should use a dedicated client.
 
 ## Run locally
 
-Set UPSTREAM_BASE_URL to a compatible base and UPSTREAM_API_KEY in the server environment, then run python3 proxy/server.py. Point a local SDK at http://127.0.0.1:8080 and provide only its client-side key if your local caller needs one. For ArgoLink, the upstream base is https://argolink.io/v1 and the server should receive the key through a secret manager. Never put the key in this README, a compose file, or an issue.
+```bash
+export UPSTREAM_BASE_URL='https://argolink.io/v1'
+export UPSTREAM_API_KEY='replace-with-a-development-key'
+export PROXY_API_KEY='optional-local-client-key'
+export MODEL_ALIASES='{"fast":"gpt-6-sol"}'
+python3 proxy/server.py
+```
 
-## Deploying safely
+Point a local SDK at `http://127.0.0.1:8080` and choose a model ID that the upstream catalog actually exposes. The proxy does not translate provider-specific fields: Responses, chat completions, and images remain different contracts. For ArgoLink, model IDs and limits come from `GET https://argolink.io/v1/models` and the corresponding model page.
 
-Place TLS and authentication in front of the process. Allowlist the client network, set a process timeout, and use a supervisor with a health check. Run as an unprivileged user. Redact Authorization headers and signed media URLs in logs. Pin the Python runtime and audit dependencies. The example catches upstream exceptions and returns 502; it does not reveal the upstream key, but the exception string still belongs in a private log policy. Limit request size before parsing JSON.
+Never put a real key in this README, a compose file, an issue, or a request log. In a shared deployment, put TLS and authentication in front of the process, run as an unprivileged user, allowlist client networks and upstream hosts, and use a supervisor with a health check. Pin the Python runtime and audit dependencies.
 
-The proxy forwards POST bodies but does not know whether a provider's operation is idempotent. If a connection drops after forwarding, do not replay a generation automatically. Video generation is asynchronous and should use a separate explicit submit/status/content runner; this proxy intentionally does not invent a video route.
+## Failure and retry policy
 
-## Compatibility
+The proxy never retries. A validation 4xx should be fixed by the caller; a 429 should preserve `Retry-After`; a connection failure before a request is written may be retried by a higher-level policy; a timeout after a POST may have created a billable generation and requires request-ID reconciliation. Do not add automatic POST retries without an idempotency contract.
 
-The OpenAI-compatible paths still depend on the upstream's exact model IDs and supported features. Responses, chat completions, and images are not interchangeable contracts. Validate tools, streaming, structured output, image sizes, and usage fields with a local mock before production. The model page or provider docs win over this example.
+The proxy forwards upstream error bodies and status codes so the caller can make a policy decision, but it never exposes the upstream key. It forwards only `Content-Type`, `X-Upstream-Request-Id`, and `Retry-After` from the upstream response. Hop-by-hop headers are intentionally not copied.
 
-## Tests and FAQ
+## Tests
 
-python3 -m unittest discover -s tests checks the body cap and User-Agent source without network access. **Why no client authentication?** Add a real auth middleware before exposing it beyond localhost. **Can it hide a key?** It keeps the upstream key server-side, but deployment controls access. **Why 502?** The upstream transport failed; inspect private logs. **Does it support streaming?** No; implement and test streaming separately rather than buffering a production stream accidentally.
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+Tests are offline and cover path/body limits, alias validation, JSON rewriting, request URL/auth/User-Agent construction, and source hygiene. They do not call an upstream or require an API key.
